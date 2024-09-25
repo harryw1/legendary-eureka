@@ -2,13 +2,15 @@ import os
 import threading
 import tkinter as tk
 import zipfile
-from idlelib.tooltip import Hovertip
 from tkinter import filedialog, messagebox, ttk
 from xml.etree import ElementTree as ET
 
 import docx
 import openpyxl
-
+from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
+from docx.table import _Cell, Table
+from docx.text.paragraph import Paragraph
 
 def select_input_files():
     file_paths = filedialog.askopenfilenames(
@@ -46,7 +48,7 @@ def extract_comments():
     ws = wb.active
     if ws is None:
         ws = wb.create_sheet()
-    ws.append(["File Name", "Comment Author", "Comment Text", "Page Number", "Referenced Text"])
+    ws.append(["File Name", "Comment Author", "Comment Text", "Referenced Text"])
 
     errors = []
     total_files = len(input_files)
@@ -61,7 +63,6 @@ def extract_comments():
                     os.path.basename(file_path),
                     comment['author'],
                     comment['text'],
-                    comment['page'],
                     comment['referenced_text']
                 ])
         except Exception as e:
@@ -85,11 +86,11 @@ def extract_comments_from_docx(file_path):
 
     # Create a mapping of comment_id to comment details
     comment_map = {}
-    with zipfile.ZipFile(file_path) as zip_file:  # Changed 'docx' to 'zip_file'
+    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    with zipfile.ZipFile(file_path) as zip_file:
         try:
             comments_xml = zip_file.read("word/comments.xml")
             root = ET.fromstring(comments_xml)
-            ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
             for comment in root.findall('w:comment', ns):
                 comment_id = comment.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id')
                 author = comment.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author')
@@ -97,44 +98,56 @@ def extract_comments_from_docx(file_path):
                 for p in comment.findall('w:p', ns):
                     for t in p.findall('.//w:t', ns):
                         texts.append(t.text if t.text else '')
-                comment_text = ''.join(texts)
+                comment_text = ' '.join(texts)
                 comment_map[comment_id] = {'author': author, 'text': comment_text}
         except KeyError:
             # No comments in the document
             pass
 
-    # Extract comments with page numbers and referenced text
-    for i, paragraph in enumerate(doc.paragraphs):
-        for run in paragraph.runs:
-            comment_reference = run._element.find('.//w:commentReference', ns)
-            if comment_reference is not None:
-                comment_id = comment_reference.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id')
-                if comment_id in comment_map:
-                    comment = comment_map[comment_id]
-                    page_number = get_page_number(doc, i)
-                    referenced_text = paragraph.text
-                    comments.append({
-                        'author': comment['author'],
-                        'text': comment['text'],
-                        'page': page_number,
-                        'referenced_text': referenced_text
-                    })
+    # Extract comments with referenced text
+    for element in iter_block_items(doc):
+        if isinstance(element, Paragraph):
+            extract_comments_from_paragraph(element, comment_map, comments, ns)
+        elif isinstance(element, Table):
+            for row in element.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        extract_comments_from_paragraph(paragraph, comment_map, comments, ns)
 
     return comments
 
+def extract_comments_from_paragraph(paragraph, comment_map, comments, ns):
+    for run in paragraph.runs:
+        comment_reference = run._element.find('.//w:commentReference', ns)
+        if comment_reference is not None:
+            comment_id = comment_reference.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id')
+            if comment_id in comment_map:
+                comment = comment_map[comment_id]
+                referenced_text = paragraph.text
+                comments.append({
+                    'author': comment['author'],
+                    'text': comment['text'],
+                    'referenced_text': referenced_text
+                })
 
-def get_page_number(doc, paragraph_index):
-    page_number = 1
-    current_page_start = 0
-    for i, p in enumerate(doc.paragraphs):
-        if i == paragraph_index:
-            return page_number
-        if p.runs and p.runs[0].element.tag.endswith('br') and p.runs[0].element.get('type') == 'page':
-            page_number += 1
-            current_page_start = i + 1
-    return page_number
+def iter_block_items(parent):
+    """
+    Generate a list of elements that form the content of a document
+    """
+    if isinstance(parent, docx.document.Document):
+        parent_elm = parent.element.body
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
+    else:
+        raise ValueError("something's not right")
 
-# GUI setup with ttk
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, parent)
+
+# GUI setup
 root = tk.Tk()
 root.title("Word Comments Extractor")
 
@@ -146,11 +159,11 @@ style.configure("TFrame", background="#f0f0f0")  # Light gray background for fra
 
 # Main frame
 mainframe = ttk.Frame(root, padding="10")
-mainframe.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+mainframe.grid(row=0, column=0, sticky="nsew")
 
 # Input files frame
 input_frame = ttk.LabelFrame(mainframe, text="Input Files", padding="5")
-input_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
+input_frame.grid(row=0, column=0, sticky="we", pady=5)
 
 input_files_scrollbar = ttk.Scrollbar(input_frame)
 input_files_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -161,7 +174,7 @@ input_files_scrollbar.config(command=input_files_list.yview)
 
 # Output file frame
 output_frame = ttk.LabelFrame(mainframe, text="Output File", padding="5")
-output_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
+output_frame.grid(row=1, column=0, sticky="we", pady=5)
 
 output_file_var = tk.StringVar()
 ttk.Entry(output_frame, textvariable=output_file_var, width=50).pack(side=tk.LEFT, padx=5)
@@ -170,7 +183,7 @@ select_output_btn.pack(side=tk.LEFT, padx=5)
 
 # Progress frame
 progress_frame = ttk.LabelFrame(mainframe, text="Progress", padding="5")
-progress_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
+progress_frame.grid(row=2, column=0, sticky="we", pady=5)
 
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(progress_frame, variable=progress_var, maximum=100)
