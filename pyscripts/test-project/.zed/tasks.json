@@ -1,0 +1,9 @@
+[
+  {
+    "label": "Run project",
+    "command": "/opt/homebrew/Caskroom/miniconda/base/bin/python",
+    "args": ["main.py"],
+    "use_new_terminal": false,
+    "shell": "system"
+  }
+]
