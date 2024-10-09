@@ -1,3 +1,4 @@
 [tool.pyright]
 venvPath = "opt/homebrew/Caskroom/miniconda"
 venv = "docx-comment-extraction"
+kernel = "docx-comment-extraction"
